@@ -1,124 +1,87 @@
 import { Hono } from "hono";
 import { cdpPaymentMiddleware } from "x402-cdp";
-import { describeRoute, openAPIRouteHandler } from "hono-openapi";
+import { extractParams } from "x402-ai";
+import { openapiFromMiddleware } from "x402-openapi";
 
 const app = new Hono<{ Bindings: Env }>();
 
 const MODELS = {
-  flux: "@cf/black-forest-labs/FLUX.1-schnell",
-  sd: "@cf/stabilityai/stable-diffusion-xl-base-1.0",
+  "flux-schnell": "@cf/black-forest-labs/FLUX.1-schnell",
+  "stable-diffusion-xl": "@cf/stabilityai/stable-diffusion-xl-base-1.0",
 } as const;
 
-app.get("/.well-known/openapi.json", openAPIRouteHandler(app, {
-  documentation: {
-    info: {
-      title: "x402 Image Generation Service",
-      description: "Generate images from text prompts using AI (FLUX.1 or Stable Diffusion XL). Pay-per-use via x402 protocol on Base mainnet.",
-      version: "1.0.0",
-    },
-    servers: [{ url: "https://imagegen.camelai.io" }],
-  },
-}));
+const SYSTEM_PROMPT = `You are a parameter extractor for an image generation service.
+Extract the following from the user's message and return JSON:
+- "prompt": the text description of the image to generate (required)
+- "model": either "flux-schnell" (fast, default) or "stable-diffusion-xl". Default "flux-schnell". (optional)
+- "steps": number of inference steps, 1-20. Default 4. (optional)
+- "width": image width in pixels. Default 1024. (optional)
+- "height": image height in pixels. Default 1024. (optional)
 
-app.use(
-  cdpPaymentMiddleware(
-    (env) => ({
-      "POST /generate": {
-        accepts: [
-          {
-            scheme: "exact",
-            price: "$0.02",
-            network: "eip155:8453",
-            payTo: env.SERVER_ADDRESS as `0x${string}`,
+Return ONLY valid JSON, no explanation.
+Examples:
+- {"prompt": "a sunset over mountains", "model": "flux-schnell", "steps": 4}
+- {"prompt": "a cat wearing a hat", "model": "stable-diffusion-xl", "steps": 8, "width": 512, "height": 512}`;
+
+const ROUTES = {
+  "POST /": {
+    accepts: [{ scheme: "exact", price: "$0.02", network: "eip155:8453", payTo: "0x0" as `0x${string}` }],
+    description: "Generate an image from a text prompt using AI. Send {\"input\": \"your prompt\"}",
+    mimeType: "image/png",
+    extensions: {
+      bazaar: {
+        info: {
+          input: {
+            type: "http",
+            method: "POST",
+            bodyType: "json",
+            body: {
+              input: { type: "string", description: "Describe the image you want to generate, optionally specifying model, steps, width, height", required: true },
+            },
           },
-        ],
-        description: "Generate an image from a text prompt using AI",
-        mimeType: "image/png",
-        extensions: {
-          bazaar: {
-            discoverable: true,
-            inputSchema: {
-              body: {
-                prompt: {
-                  type: "string",
-                  description: "Text prompt describing the image to generate",
-                  required: true,
-                },
-                model: {
-                  type: "string",
-                  description: "Model to use: 'flux' (fast, default) or 'sd' (SDXL)",
-                  required: false,
-                },
-                steps: {
-                  type: "number",
-                  description: "Number of inference steps (default 4)",
-                  required: false,
-                },
-                width: {
-                  type: "number",
-                  description: "Image width in pixels",
-                  required: false,
-                },
-                height: {
-                  type: "number",
-                  description: "Image height in pixels",
-                  required: false,
-                },
-              },
+          output: { type: "raw" },
+        },
+        schema: {
+          properties: {
+            input: {
+              properties: { method: { type: "string", enum: ["POST"] } },
+              required: ["method"],
             },
           },
         },
       },
-    })
-  )
-);
-
-app.post("/generate", describeRoute({
-  description: "Generate an image from a text prompt using AI. Requires x402 payment ($0.02).",
-  requestBody: {
-    required: true,
-    content: {
-      "application/json": {
-        schema: {
-          type: "object",
-          required: ["prompt"],
-          properties: {
-            prompt: { type: "string", description: "Text prompt describing the image to generate" },
-            model: { type: "string", enum: ["flux", "sd"], default: "flux", description: "Model: 'flux' (fast) or 'sd' (SDXL)" },
-            steps: { type: "integer", default: 4, description: "Number of inference steps" },
-            width: { type: "integer", description: "Image width in pixels" },
-            height: { type: "integer", description: "Image height in pixels" },
-          },
-        },
-      },
     },
   },
-  responses: {
-    200: { description: "Generated PNG image", content: { "image/png": { schema: { type: "string", format: "binary" } } } },
-    400: { description: "Invalid request body" },
-    402: { description: "Payment required" },
-    500: { description: "Image generation failed" },
-  },
-}), async (c) => {
-  let body: Record<string, unknown>;
-  try {
-    body = await c.req.json();
-  } catch {
-    return c.json({ error: "Invalid JSON body" }, 400);
+};
+
+app.use(
+  cdpPaymentMiddleware((env) => ({
+    "POST /": { ...ROUTES["POST /"], accepts: [{ ...ROUTES["POST /"].accepts[0], payTo: env.SERVER_ADDRESS as `0x${string}` }] },
+  }))
+);
+
+app.post("/", async (c) => {
+  const body = await c.req.json<{ input?: string }>();
+  if (!body?.input) {
+    return c.json({ error: "Missing 'input' field" }, 400);
   }
 
-  const prompt = body.prompt as string | undefined;
+  const params = await extractParams(c.env.CF_GATEWAY_TOKEN, SYSTEM_PROMPT, body.input);
+
+  const prompt = params.prompt as string | undefined;
   if (!prompt || typeof prompt !== "string" || prompt.trim().length === 0) {
-    return c.json({ error: "Missing required field: prompt" }, 400);
+    return c.json({ error: "Could not extract a prompt from your input" }, 400);
   }
 
-  const modelKey = ((body.model as string) || "flux").toLowerCase();
-  if (modelKey !== "flux" && modelKey !== "sd") {
-    return c.json({ error: "Model must be 'flux' or 'sd'" }, 400);
+  const modelKey = ((params.model as string) || "flux-schnell").toLowerCase();
+  if (modelKey !== "flux-schnell" && modelKey !== "stable-diffusion-xl") {
+    return c.json({ error: "Model must be 'flux-schnell' or 'stable-diffusion-xl'" }, 400);
   }
 
   const model = MODELS[modelKey];
-  const steps = typeof body.steps === "number" ? body.steps : 4;
+  const steps = typeof params.steps === "number" ? Math.min(Math.max(params.steps, 1), 20) : 4;
+  const width = typeof params.width === "number" ? params.width : 1024;
+  const height = typeof params.height === "number" ? params.height : 1024;
 
   try {
     const input: Record<string, unknown> = {
@@ -126,8 +89,8 @@ app.post("/generate", describeRoute({
       num_steps: steps,
     };
 
-    if (typeof body.width === "number") input.width = body.width;
-    if (typeof body.height === "number") input.height = body.height;
+    if (width !== 1024) input.width = width;
+    if (height !== 1024) input.height = height;
 
     const result = await c.env.AI.run(model as Parameters<Ai["run"]>[0], input as never);
 
@@ -142,6 +105,16 @@ app.post("/generate", describeRoute({
     const message = err instanceof Error ? err.message : "Unknown error";
     return c.json({ error: "Image generation failed", details: message }, 500);
   }
+});
+
+app.get("/.well-known/openapi.json", openapiFromMiddleware("x402 Image Gen", "imagegen.camelai.io", ROUTES));
+
+app.get("/", (c) => {
+  return c.json({
+    service: "x402-image-gen",
+    description: 'Generate images from text prompts using AI. Send POST / with {"input": "a sunset over mountains"}',
+    price: "$0.02 per request (Base mainnet)",
+  });
 });
 
 export default app;
