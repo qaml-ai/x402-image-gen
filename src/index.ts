@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { cdpPaymentMiddleware } from "x402-cdp";
+import { stripeApiKeyMiddleware } from "x402-stripe";
 import { extractParams } from "x402-ai";
 import { openapiFromMiddleware } from "x402-openapi";
 
@@ -13,7 +14,7 @@ const MODELS = {
 const SYSTEM_PROMPT = `You are a parameter extractor for an image generation service.
 Extract the following from the user's message and return JSON:
 - "prompt": the text description of the image to generate (required)
-- "model": either "flux-schnell" (fast, default) or "stable-diffusion-xl". Default "flux-schnell". (optional)
+- "model": either "stable-diffusion-xl" (default) or "flux-schnell". Default "stable-diffusion-xl". (optional)
 - "steps": number of inference steps, 1-20. Default 4. (optional)
 - "width": image width in pixels. Default 1024. (optional)
 - "height": image height in pixels. Default 1024. (optional)
@@ -54,11 +55,14 @@ const ROUTES = {
   },
 };
 
-app.use(
-  cdpPaymentMiddleware((env) => ({
+app.use(stripeApiKeyMiddleware({ serviceName: "image-gen" }));
+
+app.use(async (c, next) => {
+  if (c.get("skipX402")) return next();
+  return cdpPaymentMiddleware((env) => ({
     "POST /": { ...ROUTES["POST /"], accepts: [{ ...ROUTES["POST /"].accepts[0], payTo: env.SERVER_ADDRESS as `0x${string}` }] },
-  }))
-);
+  }))(c, next);
+});
 
 app.post("/", async (c) => {
   const body = await c.req.json<{ input?: string }>();
