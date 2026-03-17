@@ -118,10 +118,8 @@ app.post("/", async (c) => {
 app.get("/.well-known/openapi.json", openapiFromMiddleware("x402 Image Gen", "imagegen.camelai.io", ROUTES));
 
 app.get("/", (c) => {
-  return c.json({
-    service: "x402-image-gen",
-    description: 'Generate images from text prompts using AI. Send POST / with {"input": "a sunset over mountains"}',
-    price: "$0.02 per request (Base mainnet)",
+  return new Response('# imagegen.camelai.io \\u2014 Image Gen\n\nGenerate images from text prompts.\n\nPart of [camelai.io](https://camelai.io).\n\n## API\n\n\\`POST /\\` \\u2014 $0.01 per request\n\n**Body:** `{"input": "a sunset over mountains in watercolor style"}`\n\n**Response:** PNG image\n\n## Payment\n\nAccepts USDC on Base, Polygon, or Solana via x402. Or use a Stripe API key (\\`Authorization: Bearer sk_camel_...\\`).\n\nSee [camelai.io](https://camelai.io) for payment setup and full service list.', {
+    headers: { "Content-Type": "text/markdown; charset=utf-8" },
   });
 });
 
